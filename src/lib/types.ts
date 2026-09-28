@@ -59,6 +59,20 @@ export interface TranslationConflict {
   createdAt: number
 }
 
+export interface ReviewBlockDetail {
+  segmentId: string
+  index: number
+  issues: TranslationIssue[]
+}
+
+export interface ReviewResult {
+  action: string
+  segmentIds: string[]
+  passed: string[]
+  blocked: ReviewBlockDetail[]
+  reviewedAt: number
+}
+
 export interface LocalizationDocument {
   id: string
   title: string

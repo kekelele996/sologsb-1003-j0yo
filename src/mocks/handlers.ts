@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw'
-import { analyzeDocument } from '@/lib/markdown'
+import { analyzeDocument, analyzeSegment } from '@/lib/markdown'
 import { seedConflicts, seedDocument, seedHistory } from '@/lib/seed'
-import type { GlossaryTerm, Segment } from '@/lib/types'
+import type { GlossaryTerm, ReviewBlockDetail, Segment } from '@/lib/types'
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -20,8 +20,36 @@ export const handlers = [
     return HttpResponse.json({ saved: true, documentId: body.documentId, segmentCount: body.segments.length, savedAt: Date.now() })
   }),
   http.post('/api/review', async ({ request }) => {
-    const body = await request.json() as { action: string; segmentIds: string[]; reason?: string }
+    const body = await request.json() as {
+      action: string
+      segmentIds: string[]
+      reason?: string
+      segments?: Segment[]
+      glossary?: GlossaryTerm[]
+    }
     await new Promise((resolve) => setTimeout(resolve, 280))
-    return HttpResponse.json({ accepted: true, ...body, reviewedAt: Date.now() })
+    // 确认类操作必须按当前术语表逐条复查；退回类操作不拦截。
+    const shouldCheck = body.action.includes('confirm') && Array.isArray(body.segments) && Array.isArray(body.glossary)
+    const passed: string[] = []
+    const blocked: ReviewBlockDetail[] = []
+    for (const segmentId of body.segmentIds) {
+      const segment = body.segments?.find((item) => item.id === segmentId)
+      if (!segment) continue
+      const issues = shouldCheck ? analyzeSegment(segment, body.glossary ?? []) : []
+      if (issues.length) {
+        blocked.push({ segmentId, index: segment.index, issues })
+      } else {
+        passed.push(segmentId)
+      }
+    }
+    return HttpResponse.json({
+      accepted: true,
+      action: body.action,
+      segmentIds: body.segmentIds,
+      reason: body.reason,
+      passed,
+      blocked,
+      reviewedAt: Date.now(),
+    })
   }),
 ]

@@ -6,7 +6,7 @@ import {
   AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCheck, ChevronLeft, ChevronRight,
   CircleAlert, Cloud, CloudOff, Code2, Download, FileText, GitCompare, History, Import,
   Languages, Link2, Loader2, MessageSquare, RefreshCw, RotateCcw, RotateCw, Save, Search,
-  Send, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
+  Send, ShieldAlert, ShieldCheck, Sparkles, Undo2, UndoDot, Variable, X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { analyzeDocument, extractVariables, parseMarkdown, renderTargetMarkdown } from '@/lib/markdown'
 import { seedConflicts, seedDiscussions, seedDocument, seedGlossary, seedHistory, seedSegments } from '@/lib/seed'
-import type { Discussion, GlossaryTerm, HistoryEntry, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
+import type { Discussion, GlossaryTerm, HistoryEntry, ReviewResult, Segment, SegmentStatus, TranslationConflict, TranslationIssue } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 const DRAFT_KEY = 'sologsb-1003-localization-draft-v1'
@@ -31,6 +31,7 @@ const statusClass: Record<SegmentStatus, string> = {
 const issueLabel: Record<TranslationIssue['type'], string> = {
   'missing-translation': '漏译', 'missing-variable': '变量缺失', 'link-mismatch': '链接不一致', glossary: '术语不一致', 'code-format': '代码格式',
 }
+const reviewActionLabel: Record<string, string> = { confirm: '逐条确认', 'bulk-confirm': '批量确认', 'bulk-return': '批量退回' }
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
 interface EditorSnapshot {
@@ -57,6 +58,7 @@ export function LocalizationWorkbench() {
   const [hydrated, setHydrated] = useState(false)
   const [past, setPast] = useState<EditorSnapshot[]>([])
   const [future, setFuture] = useState<EditorSnapshot[]>([])
+  const [lastReview, setLastReview] = useState<ReviewResult | null>(null)
 
   const documentQuery = useQuery({
     queryKey: ['localization-document'],
@@ -105,14 +107,22 @@ export function LocalizationWorkbench() {
     },
     onSuccess: () => {
       setDirty(false)
-      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history, lastReview })) } catch { /* storage may be unavailable */ }
     },
   })
   const reviewMutation = useMutation({
-    mutationFn: async (payload: { action: string; segmentIds: string[]; reason?: string }) => {
+    mutationFn: async (payload: { action: string; segmentIds: string[]; reason?: string; segments?: Segment[]; glossary?: GlossaryTerm[] }) => {
       const response = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       if (!response.ok) throw new Error('review failed')
-      return response.json()
+      return response.json() as Promise<ReviewResult>
+    },
+    onSuccess: (result) => {
+      // 合并历史拦截：未复查片段的拦截结果继续保留，复查过的片段以最新结果为准。
+      setLastReview((current) => {
+        if (!current) return result
+        const rechecked = new Set(result.segmentIds)
+        return { ...result, blocked: [...result.blocked, ...current.blocked.filter((item) => !rechecked.has(item.segmentId))] }
+      })
     },
   })
 
@@ -123,6 +133,7 @@ export function LocalizationWorkbench() {
     return map
   }, {}), [issues])
   const issueSegmentIds = useMemo(() => new Set(issues.map((issue) => issue.segmentId)), [issues])
+  const blockedMap = useMemo(() => new Map((lastReview?.blocked ?? []).map((item) => [item.segmentId, item])), [lastReview])
   const filteredSegments = useMemo(() => segments.filter((segment) => {
     if (filter === 'issues') return issueSegmentIds.has(segment.id)
     if (filter === 'untranslated') return !segment.targetText.trim()
@@ -132,6 +143,7 @@ export function LocalizationWorkbench() {
   const selectedSegment = segments.find((segment) => segment.id === selectedSegmentId) ?? segments[0]
   const confirmedCount = segments.filter((segment) => segment.status === 'confirmed').length
   const translatedCount = segments.filter((segment) => segment.targetText.trim()).length
+  const confirmableCount = segments.filter((segment) => segment.status !== 'confirmed').length
   const progress = segments.length ? Math.round((confirmedCount / segments.length) * 100) : 0
   const filteredGlossary = glossary.filter((term) => `${term.source} ${term.target}`.toLowerCase().includes(glossarySearch.toLowerCase()))
   const selectedDiscussions = discussions.filter((discussion) => discussion.segmentId === selectedSegment?.id)
@@ -142,12 +154,13 @@ export function LocalizationWorkbench() {
     try {
       const raw = localStorage.getItem(DRAFT_KEY)
       if (raw) {
-        const draft = JSON.parse(raw) as { segments: Segment[]; discussions: Discussion[]; glossary: GlossaryTerm[]; history: HistoryEntry[] }
+        const draft = JSON.parse(raw) as { segments: Segment[]; discussions: Discussion[]; glossary: GlossaryTerm[]; history: HistoryEntry[]; lastReview?: ReviewResult | null }
         if (draft.segments?.length) {
           setSegments(draft.segments)
           setDiscussions(draft.discussions ?? seedDiscussions)
           setGlossary(draft.glossary ?? seedGlossary)
           setHistory(draft.history ?? seedHistory)
+          setLastReview(draft.lastReview ?? null)
         }
       }
     } catch { /* start from seed */ }
@@ -156,8 +169,8 @@ export function LocalizationWorkbench() {
 
   useEffect(() => {
     if (!hydrated) return
-    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history })) } catch { /* storage may be unavailable */ }
-  }, [discussions, glossary, history, hydrated, segments])
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ segments, discussions, glossary, history, lastReview })) } catch { /* storage may be unavailable */ }
+  }, [discussions, glossary, history, hydrated, lastReview, segments])
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -184,6 +197,9 @@ export function LocalizationWorkbench() {
   const updateTarget = (segment: Segment, targetText: string) => {
     const next = segments.map((item) => item.id === segment.id ? { ...item, targetText, status: item.status === 'confirmed' ? 'draft' as const : item.status } : item)
     replaceState({ segments: next, discussions: clone(discussions) })
+    setLastReview((current) => current?.blocked.some((item) => item.segmentId === segment.id)
+      ? { ...current, blocked: current.blocked.filter((item) => item.segmentId !== segment.id) }
+      : current)
   }
   const updateStatus = (segmentId: string, status: SegmentStatus, action: HistoryEntry['action'] = status === 'confirmed' ? 'confirm' : 'return') => {
     const segment = segments.find((item) => item.id === segmentId)
@@ -240,6 +256,22 @@ export function LocalizationWorkbench() {
     void reviewMutation.mutateAsync({ action: 'bulk-return', segmentIds: ids, reason: returnReason })
     setSelectedForReturn(new Set())
   }
+  // 确认前必须把当前片段与术语表发给审校接口复查；接口返回通过/拦截明细，只对通过的片段置为已确认。
+  const confirmSegments = (segmentIds: string[]) => {
+    if (!segmentIds.length || reviewMutation.isPending) return
+    void reviewMutation.mutateAsync({ action: segmentIds.length > 1 ? 'bulk-confirm' : 'confirm', segmentIds, segments, glossary }).then((result) => {
+      if (!result.passed.length) return
+      const next = segments.map((segment) => result.passed.includes(segment.id) ? { ...segment, status: 'confirmed' as const } : segment)
+      replaceState({ segments: next, discussions: clone(discussions) })
+      result.passed.forEach((id) => {
+        const segment = segments.find((item) => item.id === id)
+        if (segment) pushHistoryEntry(id, 'confirm', segment.targetText, segment.targetText, '审校 · 当前用户')
+      })
+    })
+  }
+  const bulkConfirm = () => {
+    confirmSegments(segments.filter((segment) => segment.status !== 'confirmed').map((segment) => segment.id))
+  }
   const resolveConflict = (conflict: TranslationConflict, strategy: 'local' | 'remote') => {
     const targetText = strategy === 'local' ? conflict.localText : conflict.remoteText
     const segment = segments.find((item) => item.id === conflict.segmentId)
@@ -285,7 +317,7 @@ export function LocalizationWorkbench() {
       if (editing) return
       if (event.key.toLowerCase() === 'j') { event.preventDefault(); nextIssue(1) }
       if (event.key.toLowerCase() === 'k') { event.preventDefault(); nextIssue(-1) }
-      if (event.key.toLowerCase() === 'c' && selectedSegment && mode === 'review') updateStatus(selectedSegment.id, 'confirmed')
+      if (event.key.toLowerCase() === 'c' && selectedSegment && mode === 'review') confirmSegments([selectedSegment.id])
       if (event.key.toLowerCase() === 'r' && selectedSegment && mode === 'review') updateStatus(selectedSegment.id, 'returned')
     }
     window.addEventListener('keydown', onKeyDown)
@@ -362,15 +394,35 @@ export function LocalizationWorkbench() {
             <div className="flex items-center rounded-lg bg-slate-100 p-1">
               {([['all', '全部'], ['issues', '问题'], ['untranslated', '漏译'], ['confirmed', '已确认']] as const).map(([value, label]) => <button key={value} onClick={() => setFilter(value)} className={cn('rounded-md px-3 py-1.5 text-xs font-medium transition', filter === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}
             </div>
-            <div className="ml-auto flex items-center gap-2 text-xs text-slate-500"><span>{filteredSegments.length} / {segments.length}</span><Button variant="outline" size="sm" onClick={() => nextIssue(-1)}><ArrowUp className="h-3.5 w-3.5" />上一问题</Button><Button variant="outline" size="sm" onClick={() => nextIssue(1)}>下一问题<ArrowDown className="h-3.5 w-3.5" /></Button></div>
+            <div className="ml-auto flex items-center gap-2 text-xs text-slate-500"><span>{filteredSegments.length} / {segments.length}</span>{mode === 'review' && <Button size="sm" variant="secondary" onClick={bulkConfirm} disabled={reviewMutation.isPending || !confirmableCount}>{reviewMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />}批量确认（{confirmableCount}）</Button>}<Button variant="outline" size="sm" onClick={() => nextIssue(-1)}><ArrowUp className="h-3.5 w-3.5" />上一问题</Button><Button variant="outline" size="sm" onClick={() => nextIssue(1)}>下一问题<ArrowDown className="h-3.5 w-3.5" /></Button></div>
           </div>
+
+          {lastReview && (
+            <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-3 text-xs text-slate-700 shadow-sm">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="flex items-center gap-1.5 font-semibold text-blue-900"><ShieldCheck className="h-4 w-4 text-blue-600" />最近一次审校结果</span>
+                <Badge variant="secondary">{reviewActionLabel[lastReview.action] ?? lastReview.action}</Badge>
+                <span className="text-[10px] text-slate-400">{hydrated ? new Date(lastReview.reviewedAt).toLocaleString('zh-CN') : null}</span>
+                <span className="ml-auto flex items-center gap-1 font-medium text-emerald-700"><Check className="h-3.5 w-3.5" />{lastReview.action.includes('return') ? '已退回' : '通过'} {lastReview.passed.length} 条</span>
+                <span className={cn('flex items-center gap-1 font-medium', lastReview.blocked.length ? 'text-amber-700' : 'text-slate-400')}><CircleAlert className="h-3.5 w-3.5" />拦截 {lastReview.blocked.length} 条</span>
+              </div>
+              {!!lastReview.blocked.length && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-medium text-amber-700">被拦截片段：</span>
+                  {lastReview.blocked.map((item) => <button key={item.segmentId} onClick={() => selectAndScroll(item.segmentId)} className="rounded-md border border-amber-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 hover:bg-amber-100">#{String(item.index).padStart(2, '0')}</button>)}
+                  <span className="text-[10px] text-slate-400">拦截原因已标注在对应片段上方</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {filteredSegments.map((segment) => {
             const segmentIssues = issueMap[segment.id] ?? []
+            const blockedInfo = blockedMap.get(segment.id)
             const isSelected = selectedSegment?.id === segment.id
             const isReturnSelected = selectedForReturn.has(segment.id)
             return (
-              <article id={`segment-${segment.id}`} key={segment.id} onClick={() => setSelectedSegmentId(segment.id)} className={cn('scroll-mt-32 overflow-hidden rounded-xl border bg-white shadow-sm transition', isSelected && 'ring-2 ring-blue-500/30', segment.status === 'returned' && 'border-red-200', segmentIssues.some((issue) => issue.severity === 'error') && 'border-red-200')}>
+              <article id={`segment-${segment.id}`} key={segment.id} onClick={() => setSelectedSegmentId(segment.id)} className={cn('scroll-mt-32 overflow-hidden rounded-xl border bg-white shadow-sm transition', isSelected && 'ring-2 ring-blue-500/30', segment.status === 'returned' && 'border-red-200', segmentIssues.some((issue) => issue.severity === 'error') && 'border-red-200', !!blockedInfo && !blockedInfo.issues.some((issue) => issue.severity === 'error') && 'border-amber-300')}>
                 <header className="flex flex-wrap items-center gap-2 border-b bg-slate-50/80 px-3 py-2.5">
                   <input type="checkbox" checked={isReturnSelected} onChange={() => toggleReturnSelection(segment.id)} className="h-4 w-4 rounded border-slate-300 accent-blue-600" aria-label={`选择片段 ${segment.index}`} />
                   <span className="text-[11px] font-semibold text-slate-500">#{String(segment.index).padStart(2, '0')}</span>
@@ -379,9 +431,17 @@ export function LocalizationWorkbench() {
                   {segment.protectedTokens.length > 0 && <Badge variant="secondary" className="gap-1 text-[10px]"><Variable className="h-3 w-3" />{segment.protectedTokens.length} 个受保护标记</Badge>}
                   {!!segmentIssues.length && <Badge variant="destructive" className="ml-auto">{segmentIssues.length} 个问题</Badge>}
                   <div className={cn('flex gap-1.5', !segmentIssues.length && 'ml-auto')}>
-                    {mode === 'review' && <><Button size="sm" variant="outline" className="border-emerald-300 text-emerald-700 hover:bg-emerald-50" onClick={(event) => { event.stopPropagation(); updateStatus(segment.id, 'confirmed') }}><Check className="h-3.5 w-3.5" />确认</Button><Button size="sm" variant="outline" className="border-red-200 text-red-700 hover:bg-red-50" onClick={(event) => { event.stopPropagation(); updateStatus(segment.id, 'returned') }}><X className="h-3.5 w-3.5" />退回</Button></>}
+                    {mode === 'review' && <><Button size="sm" variant="outline" className="border-emerald-300 text-emerald-700 hover:bg-emerald-50" disabled={reviewMutation.isPending} onClick={(event) => { event.stopPropagation(); confirmSegments([segment.id]) }}>{reviewMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}确认</Button><Button size="sm" variant="outline" className="border-red-200 text-red-700 hover:bg-red-50" disabled={reviewMutation.isPending} onClick={(event) => { event.stopPropagation(); updateStatus(segment.id, 'returned') }}><X className="h-3.5 w-3.5" />退回</Button></>}
                   </div>
                 </header>
+                {blockedInfo && (
+                  <div className="border-b border-amber-200 bg-amber-50/90 px-3.5 py-2.5">
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-800"><ShieldAlert className="h-3.5 w-3.5 shrink-0" />确认被拦截：按当前术语表重新检查发现 {blockedInfo.issues.length} 个问题，请修复后再确认。</p>
+                    <div className="mt-1.5 space-y-1">
+                      {blockedInfo.issues.map((issue) => <p key={issue.id} className="flex items-start gap-1.5 pl-5 text-[11px] leading-5 text-amber-700"><CircleAlert className={cn('mt-1 h-3 w-3 shrink-0', issue.severity === 'error' ? 'text-red-500' : 'text-amber-500')} /><span>{issue.message}</span></p>)}
+                    </div>
+                  </div>
+                )}
                 <div className="compare-grid grid grid-cols-2 divide-x">
                   <div className="min-w-0 p-3.5">
                     <div className="mb-2 flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">English · Source</span><Badge variant="outline" className="text-[9px]">只读</Badge></div>
