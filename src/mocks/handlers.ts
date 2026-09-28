@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw'
-import { analyzeDocument } from '@/lib/markdown'
+import { analyzeDocument, reviewCandidates } from '@/lib/markdown'
 import { seedConflicts, seedDocument, seedHistory } from '@/lib/seed'
-import type { GlossaryTerm, Segment } from '@/lib/types'
+import type { GlossaryTerm, ReviewRequestPayload, ReviewResponse, Segment } from '@/lib/types'
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -20,8 +20,30 @@ export const handlers = [
     return HttpResponse.json({ saved: true, documentId: body.documentId, segmentCount: body.segments.length, savedAt: Date.now() })
   }),
   http.post('/api/review', async ({ request }) => {
-    const body = await request.json() as { action: string; segmentIds: string[]; reason?: string }
+    const body = await request.json() as ReviewRequestPayload
     await new Promise((resolve) => setTimeout(resolve, 280))
-    return HttpResponse.json({ accepted: true, ...body, reviewedAt: Date.now() })
+    const segments = body.segments ?? seedDocument.segments
+    const glossary = body.glossary ?? seedDocument.glossary
+    const result: ReviewResponse = {
+      accepted: true,
+      action: body.action,
+      reviewedAt: Date.now(),
+      passedIds: [],
+      blocked: [],
+    }
+    // 退回操作不设质量闸门；确认（逐条/批量）前按当前术语表逐条复查。
+    if (body.action === 'confirm' || body.action === 'bulk-confirm') {
+      const { passed, blocked } = reviewCandidates(segments, body.segmentIds, glossary)
+      result.passedIds = passed.map((segment) => segment.id)
+      result.blocked = blocked.map(({ segment, issues }) => ({
+        segmentId: segment.id,
+        index: segment.index,
+        reasons: issues.map((issue) => issue.message),
+        issueTypes: issues.map((issue) => issue.type),
+      }))
+    } else {
+      result.passedIds = [...body.segmentIds]
+    }
+    return HttpResponse.json(result)
   }),
 ]

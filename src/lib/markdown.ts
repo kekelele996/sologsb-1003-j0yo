@@ -74,5 +74,31 @@ export const analyzeSegment = (segment: Segment, glossary: GlossaryTerm[]): Tran
 export const analyzeDocument = (segments: Segment[], glossary: GlossaryTerm[]) =>
   segments.flatMap((segment) => segment.status === 'confirmed' ? [] : analyzeSegment(segment, glossary))
 
+// 审校闸门：确认前必须重新检查的硬性问题（漏译、变量缺失、链接丢失）。
+// 术语不一致（glossary）与代码格式（code-format）属于警告，不阻止确认。
+export const blockingIssueTypes = ['missing-translation', 'missing-variable', 'link-mismatch'] as const
+
+export const isBlockingIssue = (issue: TranslationIssue): boolean =>
+  (blockingIssueTypes as readonly string[]).includes(issue.type)
+
+export const reviewSegment = (segment: Segment, glossary: GlossaryTerm[]): TranslationIssue[] =>
+  analyzeSegment(segment, glossary).filter(isBlockingIssue)
+
+export const reviewCandidates = (
+  segments: Segment[],
+  candidateIds: string[],
+  glossary: GlossaryTerm[],
+): { passed: Segment[]; blocked: { segment: Segment; issues: TranslationIssue[] }[] } => {
+  const candidates = segments.filter((segment) => candidateIds.includes(segment.id))
+  const blocked: { segment: Segment; issues: TranslationIssue[] }[] = []
+  const passed: Segment[] = []
+  for (const segment of candidates) {
+    const issues = reviewSegment(segment, glossary)
+    if (issues.length) blocked.push({ segment, issues })
+    else passed.push(segment)
+  }
+  return { passed, blocked }
+}
+
 export const renderTargetMarkdown = (segments: Segment[]) =>
   segments.map((segment) => segment.targetText || segment.sourceText).join('\n\n')

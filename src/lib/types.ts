@@ -59,6 +59,32 @@ export interface TranslationConflict {
   createdAt: number
 }
 
+export type ReviewAction = 'confirm' | 'bulk-confirm' | 'bulk-return'
+
+export interface ReviewBlockedItem {
+  segmentId: string
+  index: number
+  reasons: string[]
+  issueTypes: IssueType[]
+}
+
+export interface ReviewResult {
+  action: ReviewAction
+  reviewedAt: number
+  passedIds: string[]
+  blocked: ReviewBlockedItem[]
+}
+
+export interface ReviewRequestPayload {
+  action: ReviewAction
+  segmentIds: string[]
+  reason?: string
+  segments?: Segment[]
+  glossary?: GlossaryTerm[]
+}
+
+export type ReviewResponse = ReviewResult & { accepted: boolean }
+
 export interface LocalizationDocument {
   id: string
   title: string
